@@ -1,0 +1,274 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Create the lambda function to capture the listen data and store in s3
+
+Parameters:
+
+  CodeBucket:
+    Description: Location of zip containing listen lambda
+    Type: String
+
+  AnswersBucketName:
+    Description: Name of S3 bucket to store answers to surveys
+    Type: String
+
+Resources:
+
+  AnswersFifoQueue:
+    Properties:
+      QueueName: Answers.fifo
+      FifoQueue: true
+      ContentBasedDeduplication: true
+    Type: AWS::SQS::Queue
+
+  # We need to enter the name of the bucket to prevent a circular dependency
+  # between the bucket and the invoke Permission
+  ListenAnswersBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: 
+          Ref: AnswersBucketName
+      AccessControl: Private
+      NotificationConfiguration:
+         LambdaConfigurations:
+           - Event: "s3:ObjectCreated:*"
+             Function: !GetAtt ListenAnswersTriggerLambdaFunction.Arn
+
+  # S3 bucket used to store formatted answer and question data           
+  listenDataStore:
+    Type: AWS::S3::Bucket
+    Properties:
+      AccessControl: Private
+
+  ListenCaptureRole:
+    Type: AWS::IAM::Role
+    Properties:
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaRole
+      RoleName: listenCaptureRole
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: listenCaptureSurveyPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject         
+                Resource: 
+                  Fn::Sub: 
+                    - arn:aws:s3:::${bucket_name}/*
+                    - bucket_name: 
+                        Ref: AnswersBucketName
+
+  ListenDataStoreRole:
+    Type: AWS::IAM::Role
+    Properties:
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaRole
+      RoleName: listenDataStoreRole
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: listenDataStorePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject         
+                Resource: 
+                  Fn::Sub:
+                    - ${ARN}/*
+                    - ARN:
+                        !GetAtt listenDataStore.Arn
+              - Effect: Allow
+                Action:
+                  - s3:GetObject        
+                Resource: 
+                  Fn::Sub: 
+                    - arn:aws:s3:::${bucket_name}/*
+                    - bucket_name: 
+                        Ref: AnswersBucketName
+        - PolicyName: listenDataStoreSurveyPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sqs:ReceiveMessage
+                  - sqs:DeleteMessage
+                  - sqs:GetQueueAttributes
+                  - sqs:ChangeMessageVisibility        
+                Resource: !GetAtt AnswersFifoQueue.Arn
+
+  ListenAnswersTriggerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaRole
+      RoleName: listenAnswersTriggerRole
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: listenCaptureSurveyPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sqs:SendMessage        
+                Resource: !GetAtt AnswersFifoQueue.Arn
+
+  ListenAnswersTriggerInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt  ListenAnswersTriggerLambdaFunction.Arn
+      Action: "lambda:InvokeFunction"
+      Principal: "s3.amazonaws.com"
+      SourceAccount: !Ref AWS::AccountId
+      SourceArn:
+        Fn::Sub: 
+          - arn:aws:s3:::${bucket_name}
+          - bucket_name: 
+              Ref: AnswersBucketName
+  
+  # This is the lambda function used to store the initial answers to the survey
+  ListenCaptureLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: Lambda function to capture survey and store to s3
+      FunctionName: listenCapture
+      Handler: main
+      MemorySize: 128
+      Role:
+        Fn::GetAtt:
+          - ListenCaptureRole
+          - Arn
+      Runtime: go1.x
+      Timeout: 10
+      Code:
+        S3Bucket:
+          Ref: CodeBucket
+        S3Key: src/listenCapture.zip
+      Environment:
+        Variables:
+          SurveyBucket: !Ref AnswersBucketName
+
+  # This is the lambda function that is triggered when data is added to the listenAnswers bucket
+  ListenAnswersTriggerLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: Lambda function that triggers from question post to s3 and puts on FIFO
+      FunctionName: listenTrigger
+      Handler: main
+      MemorySize: 128
+      Role:
+        Fn::GetAtt:
+          - ListenAnswersTriggerRole
+          - Arn
+      Runtime: go1.x
+      Timeout: 10
+      Code:
+        S3Bucket:
+          Ref: CodeBucket
+        S3Key: src/listenQuestionTrigger.zip
+      Environment:
+         Variables:
+           AnswersFifoQueue: !Ref AnswersFifoQueue
+
+  # This is the lambda function that is triggered to actually store and format the data into the ListenDataStore bucket
+  ListenDataStoreLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: Lambda function that listens to the FIFO queue and stores the data into s3
+      FunctionName: listenDataStore
+      Handler: main
+      MemorySize: 128
+      Role:
+        Fn::GetAtt:
+          - ListenDataStoreRole
+          - Arn
+      Runtime: go1.x
+      Timeout: 10
+      Code:
+        S3Bucket:
+          Ref: CodeBucket
+        S3Key: src/listenDataStore.zip
+      Environment:
+        Variables:
+          DataStorage: !Ref listenDataStore
+          AnswersFifoQueue: !Ref AnswersFifoQueue
+          ListenAnswersBucket: !Ref ListenAnswersBucket
+
+  ListenDataStoreAnswersFifoQueueEventSourceMapping:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      BatchSize: 10
+      Enabled: true
+      EventSourceArn: !GetAtt AnswersFifoQueue.Arn
+      FunctionName: !GetAtt ListenDataStoreLambdaFunction.Arn
+
+Outputs:
+  ListenCaptureLambdaARN:
+    Value:
+      Fn::GetAtt:
+        - ListenCaptureLambdaFunction
+        - Arn
+    Export:
+      Name:
+        Fn::Sub: ${AWS::Region}-${AWS::StackName}-listenCaptureLambdaFunctionARN
+  
+  ListenAnswersTriggerLambdaARN:
+    Value:
+      Fn::GetAtt:
+        - ListenAnswersTriggerLambdaFunction
+        - Arn
+    Export:
+      Name:
+        Fn::Sub: ${AWS::Region}-${AWS::StackName}-listenAnswersTriggerLambdaFunctionARN
+
+  AnswersFifoQueueName:
+    Description: The name of the answers queue
+    Value:
+      Fn::GetAtt:
+      - AnswersFifoQueue
+      - QueueName
+
+  AnswersQueueURL:
+    Description: The URL of the answers queue
+    Value:
+      Ref: AnswersFifoQueue
+
+  AnswersQueueARN:
+    Description: The ARN of the answers queue
+    Value:
+      Fn::GetAtt:
+      - AnswersFifoQueue
+      - Arn

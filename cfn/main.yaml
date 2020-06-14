@@ -1,0 +1,37 @@
+AWSTemplateFormatVersion: '2010-09-09' 
+Description: The stack that deploys the listen application
+Parameters:
+
+  CodeBucket:
+    Description: The name of the code source bucket (.zip and CFN Templates)
+    Type: String
+
+  AnswersBucketName:
+    Description: The name of the bucket where the answers will be stored.
+    Type: String
+  
+Resources:
+  ListenCaptureLambda:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL:
+        Fn::Sub: https://${CodeBucket}.s3-eu-west-1.amazonaws.com/cfn/listenCaptureLambda.yaml             
+      TimeoutInMinutes: 60
+      Parameters:
+        CodeBucket: 
+          Ref: CodeBucket
+        AnswersBucketName:
+          Ref: AnswersBucketName
+
+  ListenAPI:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL:
+        Fn::Sub: https://${CodeBucket}.s3-eu-west-1.amazonaws.com/cfn/listenCaptureApiGateway.yaml             
+      TimeoutInMinutes: 60
+      Parameters:
+        ListenCaptureLambdaARN:
+          Fn::GetAtt:
+            - ListenCaptureLambda
+            - Outputs.ListenCaptureLambdaARN
+

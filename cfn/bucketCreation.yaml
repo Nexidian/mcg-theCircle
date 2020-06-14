@@ -1,0 +1,17 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Create the lambda function to capture the listen data and store in s3
+
+Parameters:
+  BucketName:
+    Description: Location of zip containing listen lambda
+    Type: String
+
+Resources:
+  # We need to enter the name of the bucket to prevent a circular dependency
+  # between the bucket and the invoke Permission
+  McgAppResources:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: 
+          Ref: BucketName
+      AccessControl: Private
